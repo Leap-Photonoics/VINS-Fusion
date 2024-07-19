@@ -175,13 +175,13 @@ void Estimator::changeSensorType(int use_imu, int use_stereo)
     }
 }
 
-void Estimator::inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1)
+void Estimator::inputImage(double t, const shared_ptr<cv::Mat> &_img, const shared_ptr<cv::Mat> &_img1)
 {
     inputImageCnt++;
     map<int, vector<pair<int, Matrix<double, 7, 1>>>> featureFrame;
     TicToc featureTrackerTime;
 
-    if(_img1.empty())
+    if(_img1 == NULL)
         featureFrame = featureTracker.trackImage(t, _img);
     else
         featureFrame = featureTracker.trackImage(t, _img, _img1);
@@ -530,6 +530,17 @@ void Estimator::processMeasurements()
 
             if (GNSS_ENABLE)
             {
+                bool gnss_late_msg_printed = false;
+                while (latest_gnss_time < curTime)
+                {
+                    if (!gnss_late_msg_printed)
+                    {
+                        gnss_late_msg_printed = true;
+                        printf("wait for gnss ... \n");
+                    }
+                    std::chrono::milliseconds dura(5);
+                    std::this_thread::sleep_for(dura);
+                }
                 getGNSSInterval(prevTime, curTime, gnssVector);
                 for (auto gnssMeas: gnssVector)
                     processGNSS(gnssMeas.second);

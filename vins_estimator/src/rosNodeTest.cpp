@@ -36,7 +36,7 @@ bool time_diff_valid;
 double encoder_time_diff;
 bool encoder_time_diff_valid = false;
 
-cv::Mat getImageFromMsg(const sensor_msgs::ImageConstPtr &img_msg)
+shared_ptr<cv::Mat> getImageFromMsg(const sensor_msgs::ImageConstPtr &img_msg)
 {
     cv_bridge::CvImageConstPtr ptr;
     if (img_msg->encoding == "8UC1")
@@ -54,36 +54,13 @@ cv::Mat getImageFromMsg(const sensor_msgs::ImageConstPtr &img_msg)
     else
         ptr = cv_bridge::toCvCopy(img_msg, sensor_msgs::image_encodings::MONO8);
 
-    cv::Mat img = ptr->image.clone();
-    if (img_msg->width != COL || img_msg->height != ROW)
-    {
-        cv::Mat img_resized;
-        cv::resize(img, img_resized, cv::Size(COL, ROW));
-        ROS_WARN_ONCE("Image size not correct. Resizing %d,%d->%d,%d\n", img.cols, img.rows, img_resized.cols, img_resized.rows);
-        return img_resized.clone();
-    }
-    else return img;
+    return make_shared<cv::Mat>(ptr->image);
 }
 
 void stereo_callback(const sensor_msgs::ImageConstPtr& img0, const sensor_msgs::ImageConstPtr& img1) 
 {
-    // ++img_msg_counter;
-
-    // if (skip_parameter < 0 && time_diff_valid)
-    // {
-    //     const double this_feature_ts = img0->header.stamp.toSec() + time_diff_gnss_local;
-    //     if (latest_gnss_time > 0 && tmp_last_feature_time > 0)
-    //     {
-    //         if (abs(this_feature_ts - latest_gnss_time) > abs(tmp_last_feature_time - latest_gnss_time))
-    //             skip_parameter = img_msg_counter % 2;       // skip this frame and afterwards
-    //         else
-    //             skip_parameter = 1 - (img_msg_counter % 2);   // skip next frame and afterwards
-    //     }
-    //     tmp_last_feature_time = this_feature_ts;
-    // }
-
-    // if(skip_parameter >= 0 && int(img_msg_counter%2) != skip_parameter)
-        estimator.inputImage(img0->header.stamp.toSec(), getImageFromMsg(img0), getImageFromMsg(img1));
+    // printf("dt betweem stereo image: %f\n", img0->header.stamp.toSec()-img1->header.stamp.toSec());
+    estimator.inputImage(img0->header.stamp.toSec(), getImageFromMsg(img0), getImageFromMsg(img1));
 }
 
 void mono_callback(const sensor_msgs::ImageConstPtr& img) 

@@ -56,18 +56,6 @@ class Estimator
     void setParameter();
 
     template <typename T>
-    struct timed_data 
-    {
-        double time;
-        T data;
-        timed_data():time(0), data() {}
-        timed_data(double time, T data):time(time), data(data) {}
-        bool operator< (const timed_data &other) const
-        {
-            return time > other.time;
-        }
-    };
-    template <typename T>
     struct time_pq_cmp
     {
         bool operator() (const pair<double, T> &a, const pair<double, T> &b) const 
@@ -81,7 +69,7 @@ class Estimator
     void initFirstPose(Eigen::Vector3d p, Eigen::Matrix3d r);
     void inputIMU(double t, const Vector3d &linearAcceleration, const Vector3d &angularVelocity);
     void inputFeature(double t, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &featureFrame);
-    void inputImage(double t, const cv::Mat &_img, const cv::Mat &_img1 = cv::Mat());
+    void inputImage(double t, const shared_ptr<cv::Mat> &_img, const shared_ptr<cv::Mat> &_img1 = NULL);
     void processIMU(double t, double dt, const Vector3d &linear_acceleration, const Vector3d &angular_velocity);
     void processImage(const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, const double header);
     void processMeasurements();
