@@ -10,11 +10,10 @@
 #include "estimator.h"
 #include "../utility/visualization.h"
 
-Estimator::Estimator(): f_manager{Rs}
+Estimator::Estimator()
 {
     ROS_INFO("init begins");
     initThreadFlag = false;
-    clearState();
 }
 
 Estimator::~Estimator()
@@ -103,7 +102,8 @@ void Estimator::clearState()
     last_marginalization_info = nullptr;
     last_marginalization_parameter_blocks.clear();
 
-    f_manager.clearState();
+    for (auto f_manager: f_managers)
+        f_manager->clearState();
 
     failure_occur = 0;
 
@@ -112,6 +112,13 @@ void Estimator::clearState()
 
 void Estimator::setParameter()
 {
+    for (int cam = 0; cam < NUM_OF_CAM_UNIT; ++cam)
+    {
+        featureTrackers.push_back(make_shared<FeatureTracker>());
+        f_managers.push_back(make_shared<FeatureManager>(Rs, cam));
+    }
+    clearState();
+
     mProcess.lock();
     for (int i = 0; i < NUM_OF_CAM; i++)
     {
@@ -119,14 +126,14 @@ void Estimator::setParameter()
         ric[i] = RIC[i];
         cout << " exitrinsic cam " << i << endl  << ric[i] << endl << tic[i].transpose() << endl;
     }
-    f_manager.setRic(ric);
     ProjectionTwoFrameOneCamFactor::sqrt_info = FOCAL_LENGTH / 1.5 * Matrix2d::Identity();
     ProjectionTwoFrameTwoCamFactor::sqrt_info = FOCAL_LENGTH / 1.5 * Matrix2d::Identity();
     ProjectionOneFrameTwoCamFactor::sqrt_info = FOCAL_LENGTH / 1.5 * Matrix2d::Identity();
     td = TD;
     g = G;
     cout << "set g " << g.transpose() << endl;
-    featureTracker.readIntrinsicParameter(CAM_NAMES);
+    for (int cam = 0; cam < NUM_OF_CAM_UNIT; ++cam)
+        featureTrackers[cam]->readIntrinsicParameter(vector<string>{CAM_NAMES.begin() + cam * 2, CAM_NAMES.begin() + cam * 2 + 2});
 
     std::cout << "MULTIPLE_THREAD is " << MULTIPLE_THREAD << '\n';
     if (MULTIPLE_THREAD && !initThreadFlag)
@@ -175,21 +182,25 @@ void Estimator::changeSensorType(int use_imu, int use_stereo)
     }
 }
 
-void Estimator::inputImage(double t, const shared_ptr<cv::Mat> &_img, const shared_ptr<cv::Mat> &_img1)
+void Estimator::inputImage(double t, const vector<shared_ptr<cv::Mat>> &_imgs)
 {
     inputImageCnt++;
-    map<int, vector<pair<int, Matrix<double, 7, 1>>>> featureFrame;
+    map<int, map<int, vector<pair<int, Matrix<double, 7, 1>>>>> featureFrame;
     TicToc featureTrackerTime;
 
-    if(_img1 == NULL)
-        featureFrame = featureTracker.trackImage(t, _img);
+    if(NUM_OF_CAM == 1)
+        featureFrame[0] = featureTrackers[0]->trackImage(t, _imgs[0]);
     else
-        featureFrame = featureTracker.trackImage(t, _img, _img1);
+        cv::parallel_for_(cv::Range(0, NUM_OF_CAM_UNIT), [&](const cv::Range &range)
+        {
+            for (int cam = range.start; cam < range.end; ++cam)
+                featureFrame[cam] = featureTrackers[cam]->trackImage(t, _imgs[cam * 2], _imgs[cam * 2 + 1]);
+        });
     // printf("featureTracker time: %f\n", featureTrackerTime.toc());
 
     if (SHOW_TRACK)
     {
-        cv::Mat imgTrack = featureTracker.getTrackImage();
+        cv::Mat imgTrack = featureTrackers[0]->getTrackImage();
         pubTrackImage(imgTrack, t);
     }
     
@@ -198,14 +209,14 @@ void Estimator::inputImage(double t, const shared_ptr<cv::Mat> &_img, const shar
         if(inputImageCnt % 2 == 0)
         {
             mBuf.lock();
-            featureBuf.emplace(t, make_shared<map<int, vector<pair<int, Matrix<double, 7, 1>>>>>(featureFrame));
+            featureBuf.emplace(t, make_shared<map<int, map<int, vector<pair<int, Matrix<double, 7, 1>>>>>>(featureFrame));
             mBuf.unlock();
         }
     }
     else
     {
         mBuf.lock();
-        featureBuf.emplace(t, make_shared<map<int, vector<pair<int, Matrix<double, 7, 1>>>>>(featureFrame));
+        featureBuf.emplace(t, make_shared<map<int, map<int, vector<pair<int, Matrix<double, 7, 1>>>>>>(featureFrame));
         mBuf.unlock();
         TicToc processTime;
         processMeasurements();
@@ -230,16 +241,6 @@ void Estimator::inputIMU(double t, const Vector3d &linearAcceleration, const Vec
         pubLatestOdometry(latest_P, latest_Q, latest_V, t);
         mPropagate.unlock();
     }
-}
-
-void Estimator::inputFeature(double t, const map<int, vector<pair<int, Matrix<double, 7, 1>>>> &featureFrame)
-{
-    mBuf.lock();
-    featureBuf.emplace(t, make_shared<map<int, vector<pair<int, Matrix<double, 7, 1>>>>>(featureFrame));
-    mBuf.unlock();
-
-    if(!MULTIPLE_THREAD)
-        processMeasurements();
 }
 
 void Estimator::inputEncoder(double t, double speed_l, double speed_r)
@@ -408,7 +409,7 @@ void Estimator::processMeasurements()
     while (1)
     {
         //printf("process measurments\n");
-        pair<double, shared_ptr<map<int, vector<pair<int, Matrix<double, 7, 1>>>>>> feature;
+        pair<double, shared_ptr<map<int, map<int, vector<pair<int, Matrix<double, 7, 1>>>>>>> feature;
         vector<pair<double, shared_ptr<Vector3d>>> accVector, gyrVector;
         if (!featureBuf.empty())
         {
@@ -641,24 +642,19 @@ void Estimator::processIMU(double t, double dt, const Vector3d &linear_accelerat
     gyr_0 = angular_velocity; 
 }
 
-void Estimator::processImage(const map<int, vector<pair<int, Matrix<double, 7, 1>>>> &image, const double header)
+void Estimator::processImage(const map<int, map<int, vector<pair<int, Matrix<double, 7, 1>>>>> &image, const double header)
 {
     ROS_DEBUG("new image coming ------------------------------------------");
     ROS_DEBUG("Adding feature points %lu", image.size());
-    if (f_manager.addFeatureCheckParallax(frame_count, image, td))
-    {
-        marginalization_flag = MARGIN_OLD;
-        //printf("keyframe\n");
-    }
-    else
-    {
-        marginalization_flag = MARGIN_SECOND_NEW;
-        //printf("non-keyframe\n");
-    }
+
+    marginalization_flag = MARGIN_OLD;
+    for (int cam = 0; cam < NUM_OF_CAM_UNIT; ++cam)
+        if (!f_managers[cam]->addFeatureCheckParallax(frame_count, image.at(cam), td))
+            marginalization_flag = MARGIN_SECOND_NEW;
 
     ROS_DEBUG("%s", marginalization_flag ? "Non-keyframe" : "Keyframe");
     ROS_DEBUG("Solving %d", frame_count);
-    ROS_DEBUG("number of feature: %d", f_manager.getFeatureCount());
+    ROS_DEBUG("number of feature: %d", f_managers[0]->getFeatureCount());
     Headers[frame_count] = header;
 
     ImageFrame imageframe(image, header);
@@ -668,24 +664,6 @@ void Estimator::processImage(const map<int, vector<pair<int, Matrix<double, 7, 1
         tmp_pre_integration = new IntegrationBase{acc_0, gyr_0, Bas[frame_count], Bgs[frame_count], enc_v_0};
     else
         tmp_pre_integration = new IntegrationBase{acc_0, gyr_0, Bas[frame_count], Bgs[frame_count]};
-
-    if(ESTIMATE_EXTRINSIC == 2)
-    {
-        ROS_INFO("calibrating extrinsic param, rotation movement is needed");
-        if (frame_count != 0)
-        {
-            vector<pair<Vector3d, Vector3d>> corres = f_manager.getCorresponding(frame_count - 1, frame_count);
-            Matrix3d calib_ric;
-            if (initial_ex_rotation.CalibrationExRotation(corres, pre_integrations[frame_count]->delta_q, calib_ric))
-            {
-                ROS_WARN("initial extrinsic rotation calib success");
-                ROS_WARN_STREAM("initial extrinsic rotation: " << endl << calib_ric);
-                ric[0] = calib_ric;
-                RIC[0] = calib_ric;
-                ESTIMATE_EXTRINSIC = 1;
-            }
-        }
-    }
 
     if (solver_flag == INITIAL)
     {
@@ -716,8 +694,11 @@ void Estimator::processImage(const map<int, vector<pair<int, Matrix<double, 7, 1
         // stereo + IMU initilization
         if(STEREO && USE_IMU)
         {
-            f_manager.initFramePoseByPnP(frame_count, Ps, Rs, tic, ric);
-            f_manager.triangulate(frame_count, Ps, Rs, tic, ric);
+            for (auto f_manager : f_managers)
+            {
+                f_manager->initFramePoseByPnP(frame_count, Ps, Rs, tic, ric);
+                f_manager->triangulate(frame_count, Ps, Rs, tic, ric);
+            }
             if (frame_count == WINDOW_SIZE)
             {
                 map<double, ImageFrame>::iterator frame_it;
@@ -744,8 +725,11 @@ void Estimator::processImage(const map<int, vector<pair<int, Matrix<double, 7, 1
         // stereo only initilization
         if(STEREO && !USE_IMU)
         {
-            f_manager.initFramePoseByPnP(frame_count, Ps, Rs, tic, ric);
-            f_manager.triangulate(frame_count, Ps, Rs, tic, ric);
+            for (auto f_manager : f_managers)
+            {
+                f_manager->initFramePoseByPnP(frame_count, Ps, Rs, tic, ric);
+                f_manager->triangulate(frame_count, Ps, Rs, tic, ric);
+            }
             optimization();
 
             if(frame_count == WINDOW_SIZE)
@@ -773,9 +757,12 @@ void Estimator::processImage(const map<int, vector<pair<int, Matrix<double, 7, 1
     else
     {
         TicToc t_solve;
-        if(!USE_IMU)
-            f_manager.initFramePoseByPnP(frame_count, Ps, Rs, tic, ric);
-        f_manager.triangulate(frame_count, Ps, Rs, tic, ric);
+        for (auto f_manager : f_managers)
+        {
+            if(!USE_IMU)
+                f_manager->initFramePoseByPnP(frame_count, Ps, Rs, tic, ric);
+            f_manager->triangulate(frame_count, Ps, Rs, tic, ric);
+        }
         optimization();
         if (GNSS_ENABLE)
         {
@@ -784,13 +771,16 @@ void Estimator::processImage(const map<int, vector<pair<int, Matrix<double, 7, 1
             if (gnss_ready)
                 updateGNSSStatistics();
         }
-        set<int> removeIndex;
-        outliersRejection(removeIndex);
-        f_manager.removeOutlier(removeIndex);
-        if (! MULTIPLE_THREAD)
+        for (int cam = 0; cam < NUM_OF_CAM_UNIT; ++cam)
         {
-            featureTracker.removeOutliers(removeIndex);
-            predictPtsInNextFrame();
+            set<int> removeIndex;
+            outliersRejection(cam, removeIndex);
+            f_managers[cam]->removeOutlier(removeIndex);
+            if (! MULTIPLE_THREAD)
+            {
+                featureTrackers[cam]->removeOutliers(removeIndex);
+                predictPtsInNextFrame();
+            }
         }
             
         ROS_DEBUG("solver costs: %fms", t_solve.toc());
@@ -806,7 +796,8 @@ void Estimator::processImage(const map<int, vector<pair<int, Matrix<double, 7, 1
         }
 
         slideWindow();
-        f_manager.removeFailures();
+        for (auto f_manager: f_managers)
+            f_manager->removeFailures();
         // prepare output of VINS
         key_poses.clear();
         for (int i = 0; i <= WINDOW_SIZE; i++)
@@ -895,7 +886,7 @@ bool Estimator::initialStructure()
     Vector3d T[frame_count + 1];
     map<int, Vector3d> sfm_tracked_points;
     vector<SFMFeature> sfm_f;
-    for (auto &it_per_id : f_manager.feature)
+    for (auto &it_per_id : f_managers[0]->feature)
     {
         int imu_j = it_per_id.start_frame - 1;
         SFMFeature tmp_feature;
@@ -930,7 +921,7 @@ bool Estimator::initialStructure()
     //solve pnp for all frame
     map<double, ImageFrame>::iterator frame_it;
     map<int, Vector3d>::iterator it;
-    frame_it = all_image_frame.begin( );
+    frame_it = all_image_frame.begin();
     for (int i = 0; frame_it != all_image_frame.end( ); frame_it++)
     {
         // provide initial guess
@@ -956,7 +947,7 @@ bool Estimator::initialStructure()
         frame_it->second.is_key_frame = false;
         vector<cv::Point3f> pts_3_vector;
         vector<cv::Point2f> pts_2_vector;
-        for (auto &id_pts : frame_it->second.points)
+        for (auto &id_pts : frame_it->second.points.at(0))
         {
             int feature_id = id_pts.first;
             for (auto &i_p : id_pts.second)
@@ -1060,8 +1051,11 @@ bool Estimator::visualInitialAlign()
     ROS_DEBUG_STREAM("g0     " << g.transpose());
     ROS_DEBUG_STREAM("my R0  " << Utility::R2ypr(Rs[0]).transpose()); 
 
-    f_manager.clearDepth();
-    f_manager.triangulate(frame_count, Ps, Rs, tic, ric);
+    for (auto f_manager : f_managers)
+    {
+        f_manager->clearDepth();
+        f_manager->triangulate(frame_count, Ps, Rs, tic, ric);
+    }
 
     return true;
 }
@@ -1183,7 +1177,7 @@ bool Estimator::relativePose(Matrix3d &relative_R, Vector3d &relative_T, int &l)
     for (int i = 0; i < WINDOW_SIZE; i++)
     {
         vector<pair<Vector3d, Vector3d>> corres;
-        corres = f_manager.getCorresponding(i, WINDOW_SIZE);
+        corres = f_managers[0]->getCorresponding(i, WINDOW_SIZE);
         if (corres.size() > 20)
         {
             double sum_parallax = 0;
@@ -1249,10 +1243,12 @@ void Estimator::vector2double()
         para_Ex_Pose[i][6] = q.w();
     }
 
-
-    VectorXd dep = f_manager.getDepthVector();
-    for (int i = 0; i < f_manager.getFeatureCount(); i++)
-        para_Feature[i][0] = dep(i);
+    for (int cam = 0; cam < NUM_OF_CAM_UNIT; ++cam)
+    {
+        VectorXd dep = f_managers[cam]->getDepthVector();
+        for (int i = 0; i < f_managers[cam]->getFeatureCount(); ++i)
+            para_Feature[cam][i][0] = dep(i);
+    }
 
     para_Td[0][0] = td;
     
@@ -1338,10 +1334,13 @@ void Estimator::double2vector()
         }
     }
 
-    VectorXd dep = f_manager.getDepthVector();
-    for (int i = 0; i < f_manager.getFeatureCount(); i++)
-        dep(i) = para_Feature[i][0];
-    f_manager.setDepth(dep);
+    for (int cam = 0; cam < NUM_OF_CAM_UNIT; ++cam)
+    {
+        VectorXd dep = f_managers[cam]->getDepthVector();
+        for (int i = 0; i < f_managers[cam]->getFeatureCount(); i++)
+            dep(i) = para_Feature[cam][i][0];
+        f_managers[cam]->setDepth(dep);
+    }
 
     if(USE_IMU)
         td = para_Td[0][0];
@@ -1359,11 +1358,12 @@ void Estimator::double2vector()
 bool Estimator::failureDetection()
 {
     return false;
-    if (f_manager.last_track_num < 2)
-    {
-        ROS_INFO(" little feature %d", f_manager.last_track_num);
-        //return true;
-    }
+    for (auto f_manager: f_managers)
+        if (f_manager->last_track_num < 2)
+        {
+            ROS_INFO(" little feature %d", f_manager->last_track_num);
+            //return true;
+        }
     if (Bas[WINDOW_SIZE].norm() > 2.5)
     {
         ROS_INFO(" big IMU acc bias estimation %f", Bas[WINDOW_SIZE].norm());
@@ -1556,51 +1556,54 @@ void Estimator::optimization()
     }
 
     int f_m_cnt = 0;
-    int feature_index = -1;
-    for (auto &it_per_id : f_manager.feature)
+    for (int cam = 0; cam < NUM_OF_CAM_UNIT; ++cam)
     {
-        it_per_id.used_num = it_per_id.feature_per_frame.size();
-        if (it_per_id.used_num < 4)
-            continue;
- 
-        ++feature_index;
-
-        int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;
-        
-        Vector3d pts_i = it_per_id.feature_per_frame[0].point;
-
-        for (auto &it_per_frame : it_per_id.feature_per_frame)
+        int feature_index = -1;
+        for (auto &it_per_id : f_managers[cam]->feature)
         {
-            imu_j++;
-            if (imu_i != imu_j)
-            {
-                Vector3d pts_j = it_per_frame.point;
-                ProjectionTwoFrameOneCamFactor *f_td = new ProjectionTwoFrameOneCamFactor(pts_i, pts_j, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocity,
-                                                                 it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
-                problem.AddResidualBlock(f_td, loss_function, para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Feature[feature_index], para_Td[0]);
-            }
+            it_per_id.used_num = it_per_id.feature_per_frame.size();
+            if (it_per_id.used_num < 4)
+                continue;
+    
+            ++feature_index;
 
-            if(STEREO && it_per_frame.is_stereo)
-            {                
-                Vector3d pts_j_right = it_per_frame.pointRight;
-                if(imu_i != imu_j)
+            int imu_i = it_per_id.start_frame, imu_j = imu_i - 1;
+            
+            Vector3d pts_i = it_per_id.feature_per_frame[0].point;
+
+            for (auto &it_per_frame : it_per_id.feature_per_frame)
+            {
+                imu_j++;
+                if (imu_i != imu_j)
                 {
-                    ProjectionTwoFrameTwoCamFactor *f = new ProjectionTwoFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocityRight,
-                                                                 it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
-                    problem.AddResidualBlock(f, loss_function, para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Ex_Pose[1], para_Feature[feature_index], para_Td[0]);
+                    Vector3d pts_j = it_per_frame.point;
+                    ProjectionTwoFrameOneCamFactor *f_td = new ProjectionTwoFrameOneCamFactor(pts_i, pts_j, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocity,
+                                                                    it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
+                    problem.AddResidualBlock(f_td, loss_function, para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[cam * 2], para_Feature[cam][feature_index], para_Td[0]);
                 }
-                else
-                {
-                    ProjectionOneFrameTwoCamFactor *f = new ProjectionOneFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocityRight,
-                                                                 it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
-                    problem.AddResidualBlock(f, loss_function, para_Ex_Pose[0], para_Ex_Pose[1], para_Feature[feature_index], para_Td[0]);
+
+                if(STEREO && it_per_frame.is_stereo)
+                {                
+                    Vector3d pts_j_right = it_per_frame.pointRight;
+                    if(imu_i != imu_j)
+                    {
+                        ProjectionTwoFrameTwoCamFactor *f = new ProjectionTwoFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocityRight,
+                                                                    it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
+                        problem.AddResidualBlock(f, loss_function, para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[cam * 2], para_Ex_Pose[cam * 2 + 1], para_Feature[cam][feature_index], para_Td[0]);
+                    }
+                    else
+                    {
+                        ProjectionOneFrameTwoCamFactor *f = new ProjectionOneFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocityRight,
+                                                                    it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
+                        problem.AddResidualBlock(f, loss_function, para_Ex_Pose[cam * 2], para_Ex_Pose[cam * 2 + 1], para_Feature[cam][feature_index], para_Td[0]);
+                    }
+                
                 }
-               
+                f_m_cnt++;
             }
-            f_m_cnt++;
         }
     }
-
+    
     ROS_DEBUG("visual measurement count: %d", f_m_cnt);
     //printf("prepare for ceres: %f \n", t_prepare.toc());
 
@@ -1718,9 +1721,10 @@ void Estimator::optimization()
             marginalization_info->addResidualBlockInfo(ddt_smooth_residual_block_info);
         }
 
+        for (int cam = 0; cam < NUM_OF_CAM_UNIT; ++cam)
         {
             int feature_index = -1;
-            for (auto &it_per_id : f_manager.feature)
+            for (auto &it_per_id : f_managers[cam]->feature)
             {
                 it_per_id.used_num = it_per_id.feature_per_frame.size();
                 if (it_per_id.used_num < 4)
@@ -1743,7 +1747,7 @@ void Estimator::optimization()
                         ProjectionTwoFrameOneCamFactor *f_td = new ProjectionTwoFrameOneCamFactor(pts_i, pts_j, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocity,
                                                                           it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
                         ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(f_td, loss_function,
-                                                                                        vector<double *>{para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Feature[feature_index], para_Td[0]},
+                                                                                        vector<double *>{para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[cam * 2], para_Feature[cam][feature_index], para_Td[0]},
                                                                                         vector<int>{0, 3});
                         marginalization_info->addResidualBlockInfo(residual_block_info);
                     }
@@ -1755,7 +1759,7 @@ void Estimator::optimization()
                             ProjectionTwoFrameTwoCamFactor *f = new ProjectionTwoFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocityRight,
                                                                           it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
                             ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(f, loss_function,
-                                                                                           vector<double *>{para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[0], para_Ex_Pose[1], para_Feature[feature_index], para_Td[0]},
+                                                                                           vector<double *>{para_Pose[imu_i], para_Pose[imu_j], para_Ex_Pose[cam * 2], para_Ex_Pose[cam * 2 + 1], para_Feature[cam][feature_index], para_Td[0]},
                                                                                            vector<int>{0, 4});
                             marginalization_info->addResidualBlockInfo(residual_block_info);
                         }
@@ -1764,7 +1768,7 @@ void Estimator::optimization()
                             ProjectionOneFrameTwoCamFactor *f = new ProjectionOneFrameTwoCamFactor(pts_i, pts_j_right, it_per_id.feature_per_frame[0].velocity, it_per_frame.velocityRight,
                                                                           it_per_id.feature_per_frame[0].cur_td, it_per_frame.cur_td);
                             ResidualBlockInfo *residual_block_info = new ResidualBlockInfo(f, loss_function,
-                                                                                           vector<double *>{para_Ex_Pose[0], para_Ex_Pose[1], para_Feature[feature_index], para_Td[0]},
+                                                                                           vector<double *>{para_Ex_Pose[cam * 2], para_Ex_Pose[cam * 2 + 1], para_Feature[cam][feature_index], para_Td[0]},
                                                                                            vector<int>{2});
                             marginalization_info->addResidualBlockInfo(residual_block_info);
                         }
@@ -2017,7 +2021,8 @@ void Estimator::slideWindow()
 void Estimator::slideWindowNew()
 {
     sum_of_front++;
-    f_manager.removeFront(frame_count);
+    for (auto f_manager: f_managers)
+        f_manager->removeFront(frame_count);
 }
 
 void Estimator::slideWindowOld()
@@ -2026,17 +2031,19 @@ void Estimator::slideWindowOld()
 
     bool shift_depth = solver_flag == NON_LINEAR ? true : false;
     if (shift_depth)
-    {
-        Matrix3d R0, R1;
-        Vector3d P0, P1;
-        R0 = back_R0 * ric[0];
-        R1 = Rs[0] * ric[0];
-        P0 = back_P0 + back_R0 * tic[0];
-        P1 = Ps[0] + Rs[0] * tic[0];
-        f_manager.removeBackShiftDepth(R0, P0, R1, P1);
-    }
+        for (int cam  = 0; cam < NUM_OF_CAM_UNIT; ++ cam)
+        {
+            Matrix3d R0, R1;
+            Vector3d P0, P1;
+            R0 = back_R0 * ric[cam * 2];
+            R1 = Rs[0] * ric[cam * 2];
+            P0 = back_P0 + back_R0 * tic[cam * 2];
+            P1 = Ps[0] + Rs[0] * tic[cam * 2];
+            f_managers[cam]->removeBackShiftDepth(R0, P0, R1, P1);
+        }
     else
-        f_manager.removeBack();
+        for (auto f_manager: f_managers)
+            f_manager->removeBack();
 }
 
 
@@ -2064,29 +2071,32 @@ void Estimator::predictPtsInNextFrame()
     getPoseInWorldFrame(curT);
     getPoseInWorldFrame(frame_count - 1, prevT);
     nextT = curT * (prevT.inverse() * curT);
-    map<int, Vector3d> predictPts;
-
-    for (auto &it_per_id : f_manager.feature)
+    
+    for (int cam = 0; cam < NUM_OF_CAM_UNIT; ++cam)
     {
-        if(it_per_id.estimated_depth > 0)
+        map<int, Vector3d> predictPts;
+        for (auto &it_per_id : f_managers[cam]->feature)
         {
-            int firstIndex = it_per_id.start_frame;
-            int lastIndex = it_per_id.start_frame + it_per_id.feature_per_frame.size() - 1;
-            //printf("cur frame index  %d last frame index %d\n", frame_count, lastIndex);
-            if((int)it_per_id.feature_per_frame.size() >= 2 && lastIndex == frame_count)
+            if(it_per_id.estimated_depth > 0)
             {
-                double depth = it_per_id.estimated_depth;
-                Vector3d pts_j = ric[0] * (depth * it_per_id.feature_per_frame[0].point) + tic[0];
-                Vector3d pts_w = Rs[firstIndex] * pts_j + Ps[firstIndex];
-                Vector3d pts_local = nextT.block<3, 3>(0, 0).transpose() * (pts_w - nextT.block<3, 1>(0, 3));
-                Vector3d pts_cam = ric[0].transpose() * (pts_local - tic[0]);
-                int ptsIndex = it_per_id.feature_id;
-                predictPts[ptsIndex] = pts_cam;
+                int firstIndex = it_per_id.start_frame;
+                int lastIndex = it_per_id.start_frame + it_per_id.feature_per_frame.size() - 1;
+                //printf("cur frame index  %d last frame index %d\n", frame_count, lastIndex);
+                if((int)it_per_id.feature_per_frame.size() >= 2 && lastIndex == frame_count)
+                {
+                    double depth = it_per_id.estimated_depth;
+                    Vector3d pts_j = ric[cam * 2] * (depth * it_per_id.feature_per_frame[0].point) + tic[cam * 2];
+                    Vector3d pts_w = Rs[firstIndex] * pts_j + Ps[firstIndex];
+                    Vector3d pts_local = nextT.block<3, 3>(0, 0).transpose() * (pts_w - nextT.block<3, 1>(0, 3));
+                    Vector3d pts_cam = ric[cam * 2].transpose() * (pts_local - tic[cam * 2]);
+                    int ptsIndex = it_per_id.feature_id;
+                    predictPts[ptsIndex] = pts_cam;
+                }
             }
         }
+        featureTrackers[cam]->setPrediction(predictPts);
+        //printf("estimator output %d predict pts\n",(int)predictPts.size());
     }
-    featureTracker.setPrediction(predictPts);
-    //printf("estimator output %d predict pts\n",(int)predictPts.size());
 }
 
 double Estimator::reprojectionError(Matrix3d &Ri, Vector3d &Pi, Matrix3d &rici, Vector3d &tici,
@@ -2101,11 +2111,11 @@ double Estimator::reprojectionError(Matrix3d &Ri, Vector3d &Pi, Matrix3d &rici, 
     return sqrt(rx * rx + ry * ry);
 }
 
-void Estimator::outliersRejection(set<int> &removeIndex)
+void Estimator::outliersRejection(int cam, set<int> &removeIndex)
 {
     //return;
     int feature_index = -1;
-    for (auto &it_per_id : f_manager.feature)
+    for (auto &it_per_id : f_managers[cam]->feature)
     {
         double err = 0;
         int errCnt = 0;
@@ -2122,8 +2132,8 @@ void Estimator::outliersRejection(set<int> &removeIndex)
             if (imu_i != imu_j)
             {
                 Vector3d pts_j = it_per_frame.point;             
-                double tmp_error = reprojectionError(Rs[imu_i], Ps[imu_i], ric[0], tic[0], 
-                                                    Rs[imu_j], Ps[imu_j], ric[0], tic[0],
+                double tmp_error = reprojectionError(Rs[imu_i], Ps[imu_i], ric[cam * 2], tic[cam * 2], 
+                                                    Rs[imu_j], Ps[imu_j], ric[cam * 2], tic[cam * 2],
                                                     depth, pts_i, pts_j);
                 err += tmp_error;
                 errCnt++;
@@ -2136,8 +2146,8 @@ void Estimator::outliersRejection(set<int> &removeIndex)
                 Vector3d pts_j_right = it_per_frame.pointRight;
                 if(imu_i != imu_j)
                 {            
-                    double tmp_error = reprojectionError(Rs[imu_i], Ps[imu_i], ric[0], tic[0], 
-                                                        Rs[imu_j], Ps[imu_j], ric[1], tic[1],
+                    double tmp_error = reprojectionError(Rs[imu_i], Ps[imu_i], ric[cam * 2], tic[cam * 2], 
+                                                        Rs[imu_j], Ps[imu_j], ric[cam * 2 + 1], tic[cam * 2 + 1],
                                                         depth, pts_i, pts_j_right);
                     err += tmp_error;
                     errCnt++;
@@ -2145,8 +2155,8 @@ void Estimator::outliersRejection(set<int> &removeIndex)
                 }
                 else
                 {
-                    double tmp_error = reprojectionError(Rs[imu_i], Ps[imu_i], ric[0], tic[0], 
-                                                        Rs[imu_j], Ps[imu_j], ric[1], tic[1],
+                    double tmp_error = reprojectionError(Rs[imu_i], Ps[imu_i], ric[cam * 2], tic[cam * 2], 
+                                                        Rs[imu_j], Ps[imu_j], ric[cam * 2 + 1], tic[cam * 2 + 1],
                                                         depth, pts_i, pts_j_right);
                     err += tmp_error;
                     errCnt++;

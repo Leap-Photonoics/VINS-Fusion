@@ -69,9 +69,9 @@ class Estimator
     void initFirstPose(Eigen::Vector3d p, Eigen::Matrix3d r);
     void inputIMU(double t, const Vector3d &linearAcceleration, const Vector3d &angularVelocity);
     void inputFeature(double t, const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &featureFrame);
-    void inputImage(double t, const shared_ptr<cv::Mat> &_img, const shared_ptr<cv::Mat> &_img1 = NULL);
+    void inputImage(double t, const vector<shared_ptr<cv::Mat>> &_imgs);
     void processIMU(double t, double dt, const Vector3d &linear_acceleration, const Vector3d &angular_velocity);
-    void processImage(const map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> &image, const double header);
+    void processImage(const map<int, map<int, vector<pair<int, Matrix<double, 7, 1>>>>> &image, const double header);
     void processMeasurements();
     void changeSensorType(int use_imu, int use_stereo);
 
@@ -92,7 +92,7 @@ class Estimator
     void getPoseInWorldFrame(Eigen::Matrix4d &T);
     void getPoseInWorldFrame(int index, Eigen::Matrix4d &T);
     void predictPtsInNextFrame();
-    void outliersRejection(set<int> &removeIndex);
+    void outliersRejection(int cam, set<int> &removeIndex);
     double reprojectionError(Matrix3d &Ri, Vector3d &Pi, Matrix3d &rici, Vector3d &tici,
                                      Matrix3d &Rj, Vector3d &Pj, Matrix3d &ricj, Vector3d &ticj, 
                                      double depth, Vector3d &uvi, Vector3d &uvj);
@@ -133,7 +133,7 @@ class Estimator
 
     time_pq<Eigen::Vector3d> accBuf, gyrBuf;
     time_pq<Matrix<double,6,1>> encBuf;
-    time_pq<map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>> featureBuf;
+    time_pq<map<int, map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>>>> featureBuf;
     time_pq<vector<ObsPtr>> gnssBuf;
     atomic<double> latest_imu_time, latest_encoder_time, latest_gnss_time;
     // queue<pair<double, Eigen::Vector3d>> accBuf;
@@ -149,14 +149,14 @@ class Estimator
     std::thread trackThread;
     std::thread processThread;
 
-    FeatureTracker featureTracker;
+    vector<shared_ptr<FeatureTracker>> featureTrackers;
 
     SolverFlag solver_flag;
     MarginalizationFlag  marginalization_flag;
     Vector3d g;
 
-    Matrix3d ric[2];
-    Vector3d tic[2];
+    Matrix3d ric[10];
+    Vector3d tic[10];
 
     Vector3d        Ps[(WINDOW_SIZE + 1)];
     Vector3d        Vs[(WINDOW_SIZE + 1)];
@@ -202,7 +202,7 @@ class Estimator
     int sum_of_outlier, sum_of_back, sum_of_front, sum_of_invalid;
     int inputImageCnt;
 
-    FeatureManager f_manager;
+    vector<shared_ptr<FeatureManager>> f_managers;
     MotionEstimator m_estimator;
     InitialEXRotation initial_ex_rotation;
 
@@ -218,8 +218,8 @@ class Estimator
 
     double para_Pose[WINDOW_SIZE + 1][SIZE_POSE];
     double para_SpeedBias[WINDOW_SIZE + 1][SIZE_SPEEDBIAS];
-    double para_Feature[NUM_OF_F][SIZE_FEATURE];
-    double para_Ex_Pose[2][SIZE_POSE];
+    double para_Feature[10][NUM_OF_F][SIZE_FEATURE];
+    double para_Ex_Pose[10][SIZE_POSE];
     double para_Retrive_Pose[SIZE_POSE];
     double para_Td[1][1];
     double para_Tr[1][1];

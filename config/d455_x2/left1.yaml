@@ -1,0 +1,30 @@
+%YAML:1.0
+
+#camera calibration 
+model_type: PINHOLE
+camera_name: camera
+image_width: 848
+image_height: 480
+
+distortion_parameters:
+   k1: -0.0031529871665762887
+   k2: -0.0025456902090783924
+   p1: 0.0004902539348520499
+   p2: 0.0010103535201928047
+   
+projection_parameters:
+   fx: 425.8154292382763
+   fy: 425.5720886063979
+   cx: 427.20537438719623
+   cy: 241.48480319767302
+
+TIC: !!opencv-matrix
+   rows: 4
+   cols: 4
+   dt: d
+   data: [ 0.99993103, -0.00744744,  0.00908151, -0.02804749,
+           0.00739535,  0.99995608,  0.00575693,  0.00385725,
+          -0.00912399, -0.00568937,  0.99994219,  0.03189417,
+           0.        ,  0.        ,  0.        ,  1.        ]
+
+image_topic: "/camera_left/infra1/image_rect_raw"

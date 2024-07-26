@@ -36,6 +36,9 @@ bool time_diff_valid;
 double encoder_time_diff;
 bool encoder_time_diff_valid = false;
 
+vector<queue<sensor_msgs::ImageConstPtr>> img_buffer;
+std::mutex m_buf;
+
 shared_ptr<cv::Mat> getImageFromMsg(const sensor_msgs::ImageConstPtr &img_msg)
 {
     cv_bridge::CvImageConstPtr ptr;
@@ -57,15 +60,70 @@ shared_ptr<cv::Mat> getImageFromMsg(const sensor_msgs::ImageConstPtr &img_msg)
     return make_shared<cv::Mat>(ptr->image);
 }
 
-void stereo_callback(const sensor_msgs::ImageConstPtr& img0, const sensor_msgs::ImageConstPtr& img1) 
+void img_callback(const int cam_id, const sensor_msgs::ImageConstPtr& img) 
 {
-    // printf("dt betweem stereo image: %f\n", img0->header.stamp.toSec()-img1->header.stamp.toSec());
-    estimator.inputImage(img0->header.stamp.toSec(), getImageFromMsg(img0), getImageFromMsg(img1));
+    lock_guard<mutex> lock(m_buf);
+    img_buffer[cam_id].push(img);
 }
 
-void mono_callback(const sensor_msgs::ImageConstPtr& img) 
+void stereo_sync()
 {
-    estimator.inputImage(img->header.stamp.toSec(), getImageFromMsg(img));
+    static const double max_dt = 0.01;
+    while (1)
+    {
+        unique_lock<mutex> m_buf_lock(m_buf);
+        bool buffer_empty = false;
+        vector<shared_ptr<cv::Mat>> imgs;
+        double t;
+        for (int i = 0; i < NUM_OF_CAM; i++)
+            if (img_buffer[i].empty())
+            {
+                buffer_empty = true;
+                break;
+            }
+        if (!buffer_empty)
+        {
+            bool all_sync = true;
+            for (int i = 1; i < NUM_OF_CAM; i++)
+            {
+                double dt = img_buffer[i].front()->header.stamp.toSec() - img_buffer[0].front()->header.stamp.toSec();    
+                if (dt > max_dt)
+                {
+                    img_buffer[0].pop();
+                    ROS_INFO("throw image 0");
+                    all_sync = false;
+                    break;
+                }
+                if (dt < -max_dt)
+                {
+                    img_buffer[i].pop();
+                    ROS_INFO("throw image %d", i);
+                    all_sync = false;
+                    break;
+                }
+            }
+            if (all_sync)
+            {
+                t = img_buffer[0].front()->header.stamp.toSec();
+                for (int i = 0; i < NUM_OF_CAM; i++)
+                {
+                    imgs.push_back(getImageFromMsg(img_buffer[i].front()));
+                    img_buffer[i].pop();
+                }
+            }
+        }
+        m_buf_lock.unlock();
+        if (!imgs.empty())
+            estimator.inputImage(t, imgs);
+
+        std::chrono::milliseconds dura(30);
+        std::this_thread::sleep_for(dura);
+    }
+}
+
+void mono_callback(const sensor_msgs::ImageConstPtr& img0) 
+{
+    estimator.inputImage(img0->header.stamp.toSec(), {getImageFromMsg(img0)});
 }
 
 void imu_callback(const sensor_msgs::ImuConstPtr &imu_msg)
@@ -205,16 +263,15 @@ int main(int argc, char **argv)
         sub_imu = n.subscribe(IMU_TOPIC, 2000, imu_callback, ros::TransportHints().tcpNoDelay());
     }
 
-    message_filters::Subscriber<sensor_msgs::Image> sub_img0(n, IMAGE0_TOPIC, 100), sub_img1;
-    typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::Image, sensor_msgs::Image> sync_policy;
-    message_filters::Synchronizer<sync_policy> sync(sync_policy(100), sub_img0, sub_img1);
-    if (STEREO)
+    vector<shared_ptr<ros::Subscriber>> sub_imgs;
+
+    ROS_ASSERT(NUM_OF_CAM == 1 || NUM_OF_CAM == 2 || NUM_OF_CAM == 4);
+
+    for (int i = 0; i < NUM_OF_CAM; i++)
     {
-        sub_img1.subscribe(n, IMAGE1_TOPIC, 100);
-        sync.registerCallback(stereo_callback);
+        sub_imgs.push_back(make_shared<ros::Subscriber>(n.subscribe<sensor_msgs::Image>(IMAGE_TOPICS[i], 100, bind(img_callback, i, _1))));
+        img_buffer.push_back(queue<sensor_msgs::ImageConstPtr>());
     }
-    else
-        sub_img0.registerCallback(mono_callback);
 
     ros::Subscriber sub_restart = n.subscribe("/vins_restart", 100, restart_callback);
 
@@ -246,6 +303,7 @@ int main(int argc, char **argv)
     if (ENCODER_ENABLE) 
         sub_encoder = n.subscribe(ENCODER_TOPIC, 2000, encoder_callback, ros::TransportHints().tcpNoDelay());
 
+    thread sync_thread{stereo_sync};
     ros::spin();
 
     return 0;

@@ -1,0 +1,105 @@
+%YAML:1.0
+
+#common parameters
+#support: 1 imu 1 cam; 1 imu 2 cam: 2 cam; 
+imu: 1         
+num_of_cam: 4
+
+imu_topic: "/camera_left/imu"
+output_path: "/workspaces/vins-fusion/output"
+
+cams: ["left1", "left2", "right1", "right2"]
+image_width: 848
+image_height: 480
+
+# Extrinsic parameter between IMU and Camera.
+estimate_extrinsic: 0   # 0  Have an accurate extrinsic parameters. We will trust the following imu^R_cam, imu^T_cam, don't change it.
+                        # 1  Have an initial guess about extrinsic parameters. We will optimize around your initial guess.
+
+#Multiple thread support
+multiple_thread: 1
+
+#feature traker paprameters
+max_cnt: 250            # max feature number in feature tracking
+min_dist: 30            # min distance between two features 
+freq: 0                 # frequence (Hz) of publish tracking result. At least 10Hz for good estimation. If set 0, the frequence will be same as raw image 
+F_threshold: 1.0        # ransac threshold (pixel)
+show_track: 1           # publish tracking image as topic
+flow_back: 1            # perform forward and backward optical flow to improve feature tracking accuracy
+
+#optimization parameters
+max_solver_time: 0.04  # max solver itration time (ms), to guarantee real time
+max_num_iterations: 10   # max solver itrations, to guarantee real time
+keyframe_parallax: 10.0 # keyframe selection threshold (pixel)
+
+#imu parameters       The more accurate parameters you provide, the better performance
+#  accelerometer_noise_density: 0.12017012487008882
+#  accelerometer_random_walk: 0.0006340441374997897
+#  gyroscope_noise_density: 0.026013041088982482
+#  gyroscope_random_walk: 4.102358091270743e-05
+
+#Calibrated on 04//2024 400hz raw measurement
+# gyr_n: 0.09410278031269959
+# gyr_w: 0.0012599444606331053
+# acc_n: 0.019388599614368087
+# acc_w: 0.00038289501684054644
+infl_n: 10
+infl_w: 3
+acc_n: 1.8173701224327213e-02           # accelerometer measurement noise standard deviation. #2.5
+gyr_n: 4.0215257386372735e-03           # gyroscope measurement noise standard deviation.     #0.05
+acc_w: 3.5048022931587571e-04          # accelerometer bias random work noise standard deviation.  #3e-4
+gyr_w: 2.3582424018057772e-05        # gyroscope bias random work noise standard deviation.     #1.6e-5
+g_norm: 9.81         # gravity magnitude
+
+#unsynchronization parameters
+estimate_td: 0                      # online estimate time offset between camera and imu
+td: 0.0006110395614722162           # initial value of time offset. unit: s. readed image clock + td = real image clock (IMU clock)
+
+#loop closure parameters
+load_previous_pose_graph: 0        # load and reuse previous pose graph; load from 'pose_graph_save_path'
+pose_graph_save_path: "/home/xcli/vins-fusion/output/pose_graph4/" # save and load path
+save_image: 1                   # save image in pose graph for visualization prupose; you can close this function by setting 0 
+
+gnss_enable: 0
+gnss_meas_topic: "/ublox_driver/range_meas"           # GNSS raw measurement topic
+gnss_ephem_topic: "/ublox_driver/ephem"               # GPS, Galileo, BeiDou ephemeris
+gnss_glo_ephem_topic: "/ublox_driver/glo_ephem"       # GLONASS ephemeris
+gnss_iono_params_topic: "/ublox_driver/iono_params"   # GNSS broadcast ionospheric parameters
+gnss_tp_info_topic: "/ublox_driver/time_pulse_info"   # PPS time info
+gnss_elevation_thres: 30            # satellite elevation threshold (degree)
+gnss_psr_std_thres: 2.0             # pseudo-range std threshold
+gnss_dopp_std_thres: 2.0            # doppler std threshold
+gnss_track_num_thres: 20            # number of satellite tracking epochs before entering estimator
+gnss_ddt_sigma: 0.1
+
+gnss_local_online_sync: 1                       # if perform online synchronization betwen GNSS and local time
+local_trigger_info_topic: "/camera/infra1/image_rect_raw"   # external trigger info of the local sensor, if `gnss_local_online_sync` is 1
+gnss_local_time_diff: 18                       # difference between GNSS and local time (s), if `gnss_local_online_sync` is 0
+
+gnss_iono_default_parameters: !!opencv-matrix
+   rows: 1
+   cols: 8
+   dt: d
+   data: [0.1118E-07,  0.2235E-07, -0.4172E-06,  0.6557E-06,
+          0.1249E+06, -0.4424E+06,  0.1507E+07, -0.2621E+06]
+
+encoder_enable: 1
+encoder_topic: "/speed_fb"
+enc_n: 0.1
+RIO: !!opencv-matrix
+   rows: 3
+   cols: 3
+   dt: d
+   data: [ 1, 0, 0,
+           0, 1, 0,
+           0, 0, 1]
+TIO_L: !!opencv-matrix
+   rows: 3
+   cols: 1
+   dt: d
+   data: [-0.23, 0.38, -0.6]
+TIO_R: !!opencv-matrix
+   rows: 3
+   cols: 1
+   dt: d
+   data: [0.35, 0.38, -0.6]

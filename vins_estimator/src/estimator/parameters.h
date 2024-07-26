@@ -53,13 +53,14 @@ extern int ESTIMATE_TD;
 extern int ROLLING_SHUTTER;
 extern int ROW, COL;
 extern int NUM_OF_CAM;
+extern int NUM_OF_CAM_UNIT;
 extern int STEREO;
 extern int USE_IMU;
 extern int MULTIPLE_THREAD;
 // pts_gt for debug purpose;
 extern map<int, Eigen::Vector3d> pts_gt;
 
-extern std::string IMAGE0_TOPIC, IMAGE1_TOPIC;
+extern vector<std::string> IMAGE_TOPICS;
 extern std::string FISHEYE_MASK;
 extern std::vector<std::string> CAM_NAMES;
 extern int MAX_CNT;

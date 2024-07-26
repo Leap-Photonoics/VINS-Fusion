@@ -32,9 +32,9 @@ class IntegrationBase
     IntegrationBase (const Vector3d &_acc_0, const Vector3d &_gyr_0,
                      const Vector3d &_linearized_ba, const Vector3d &_linearized_bg,
                      const Matrix<double, 6, 1> &_enc_v_0)
-        : acc_0{_acc_0}, gyr_0{_gyr_0}, linearized_acc{_acc_0}, linearized_gyr{_gyr_0},
+        : acc_0{_acc_0}, gyr_0{_gyr_0}, enc_v_0{_enc_v_0},
+          linearized_acc{_acc_0}, linearized_gyr{_gyr_0}, linearized_enc_v{_enc_v_0},
           linearized_ba{_linearized_ba}, linearized_bg{_linearized_bg},
-          enc_v_0{_enc_v_0},linearized_enc_v{_enc_v_0},
           jacobian_enc{Matrix<double, 21, 21>::Identity()}, covariance_enc{Matrix<double, 21, 21>::Zero()},
           sum_dt{0.0}, delta_p{Vector3d::Zero()}, delta_q{Quaterniond::Identity()}, delta_v{Vector3d::Zero()},
           delta_eta{Matrix<double, 6, 1>::Zero()}
