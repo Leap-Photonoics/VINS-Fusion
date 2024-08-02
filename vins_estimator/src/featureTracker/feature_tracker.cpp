@@ -114,6 +114,7 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
         TicToc t_o;
         vector<uchar> status;
         vector<float> err;
+        /*
         if(hasPrediction)
         {
             cur_pts = predict_pts;
@@ -153,6 +154,12 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
         for (int i = 0; i < int(cur_pts.size()); i++)
             if (status[i] && !inBorder(cur_pts[i]))
                 status[i] = 0;
+        */
+
+        raft.track(*prev_img, *cur_img, prev_pts, cur_pts);
+        for (auto pt: cur_pts)
+            status.push_back(inBorder(pt));
+
         reduceVector(prev_pts, status);
         reduceVector(cur_pts, status);
         reduceVector(ids, status);
@@ -212,6 +219,7 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
             vector<cv::Point2f> reverseLeftPts;
             vector<uchar> status, statusRightLeft;
             vector<float> err;
+            /*
             // cur left ---- cur right
             cv::calcOpticalFlowPyrLK(*cur_img, *rightImg, cur_pts, cur_right_pts, status, err, cv::Size(21, 21), 3);
             // reverse check cur right ---- cur left
@@ -226,6 +234,11 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
                         status[i] = 0;
                 }
             }
+            */
+
+            raft.track(*cur_img, *rightImg, cur_pts, cur_right_pts);
+            for (auto pt: cur_right_pts)
+                status.push_back(inBorder(pt));
 
             ids_right = ids;
             reduceVector(cur_right_pts, status);
