@@ -261,7 +261,8 @@ void Estimator::getEncoderInterval(double t0, double t1, vector<pair<double, sha
         encBuf.pop();
     }
     encVector.push_back(encBuf.top());
-    encBuf.push(encVector[encVector.size() - 2]);
+    if (encVector.size() > 1)
+        encBuf.push(encVector[encVector.size() - 2]);
 }
 
 void Estimator::getIMUInterval(double t0, double t1, vector<pair<double, shared_ptr<Vector3d>>> &accVector, 
@@ -287,7 +288,7 @@ void Estimator::getGNSSInterval(double t0, double t1, vector<pair<double, shared
 {
     std::lock_guard<std::mutex> lg(mBuf);
     while (gnssBuf.top().first <= t0)
-            gnssBuf.pop();
+        gnssBuf.pop();
     while (gnssBuf.top().first < t1)
     {
         gnssVector.push_back(gnssBuf.top());
