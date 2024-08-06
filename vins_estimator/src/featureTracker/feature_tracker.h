@@ -18,12 +18,23 @@
 #include <csignal>
 #include <opencv2/opencv.hpp>
 #include <eigen3/Eigen/Dense>
+#include <vpi/Array.h>
+#include <vpi/Image.h>
+#include <vpi/Pyramid.h>
+#include <vpi/Status.h>
+#include <vpi/Stream.h>
+#include <vpi/OpenCVInterop.hpp>
+#include <vpi/algo/ConvertImageFormat.h>
+#include <vpi/algo/GaussianPyramid.h>
+#include <vpi/algo/OpticalFlowPyrLK.h>
+#include <vpi/algo/HarrisCorners.h>
 
 #include "camodocal/camera_models/CameraFactory.h"
 #include "camodocal/camera_models/CataCamera.h"
 #include "camodocal/camera_models/PinholeCamera.h"
 #include "../estimator/parameters.h"
 #include "../utility/tic_toc.h"
+#include "vpi_helper.h"
 
 using namespace std;
 using namespace camodocal;
@@ -59,7 +70,6 @@ public:
     cv::Mat getTrackImage();
     bool inBorder(const cv::Point2f &pt);
 
-    int row, col;
     cv::Mat imTrack;
     cv::Mat mask;
     cv::Mat fisheye_mask;
@@ -79,6 +89,14 @@ public:
     double cur_time;
     double prev_time;
     bool stereo_cam;
-    int n_id;
+    static int n_id;
     bool hasPrediction;
+
+    VPIStream vpi_stream;
+    VPIPyramid prev_pyr, cur_pyr, right_pyr;
+    VPIImage vpi_cur_img;
+    VPIPayload optflow;
+    VPIOpticalFlowPyrLKParams lk_params;
+    VPIArray vpi_prev_pts, vpi_cur_pts, vpi_predict_pts, vpi_cur_right_pts;
+    VPIBackend backend = VPI_BACKEND_CUDA;
 };

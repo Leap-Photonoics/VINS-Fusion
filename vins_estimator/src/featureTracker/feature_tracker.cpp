@@ -11,12 +11,14 @@
 
 #include "feature_tracker.h"
 
+int FeatureTracker::n_id = 0;
+
 bool FeatureTracker::inBorder(const cv::Point2f &pt)
 {
     const int BORDER_SIZE = 1;
     int img_x = cvRound(pt.x);
     int img_y = cvRound(pt.y);
-    return BORDER_SIZE <= img_x && img_x < col - BORDER_SIZE && BORDER_SIZE <= img_y && img_y < row - BORDER_SIZE;
+    return BORDER_SIZE <= img_x && img_x < COL - BORDER_SIZE && BORDER_SIZE <= img_y && img_y < ROW - BORDER_SIZE;
 }
 
 double distance(cv::Point2f pt1, cv::Point2f pt2)
@@ -50,11 +52,21 @@ FeatureTracker::FeatureTracker()
     stereo_cam = 0;
     n_id = 0;
     hasPrediction = false;
+    vpiCheckState(vpiStreamCreate(backend, &vpi_stream));
+    vpiCheckState(vpiPyramidCreate(COL, ROW, VPI_IMAGE_FORMAT_U8, 1, 0.5, 0, &prev_pyr));
+    vpiCheckState(vpiPyramidCreate(COL, ROW, VPI_IMAGE_FORMAT_U8, 1, 0.5, 0, &cur_pyr));
+    vpiCheckState(vpiPyramidCreate(COL, ROW, VPI_IMAGE_FORMAT_U8, 1, 0.5, 0, &right_pyr));
+    vpiCheckState(vpiInitOpticalFlowPyrLKParams(&lk_params));
+    vpiCheckState(vpiArrayCreate(MAX_CNT, VPI_ARRAY_TYPE_KEYPOINT_F32, 0, &vpi_prev_pts));
+    vpiCheckState(vpiArrayCreate(MAX_CNT, VPI_ARRAY_TYPE_KEYPOINT_F32, 0, &vpi_cur_pts));
+    vpiCheckState(vpiArrayCreate(MAX_CNT, VPI_ARRAY_TYPE_KEYPOINT_F32, 0, &vpi_cur_right_pts));
+    vpiCheckState(vpiArrayCreate(MAX_CNT, VPI_ARRAY_TYPE_KEYPOINT_F32, 0, &vpi_predict_pts));
+    vpiCheckState(vpiCreateOpticalFlowPyrLK(backend, COL, ROW, VPI_IMAGE_FORMAT_U8, 1, 0.5, &optflow));
 }
 
 void FeatureTracker::setMask()
 {
-    mask = cv::Mat(row, col, CV_8UC1, cv::Scalar(255));
+    mask = cv::Mat(ROW, COL, CV_8UC1, cv::Scalar(255));
 
     // prefer to keep features that are tracked for long time
     vector<pair<int, pair<cv::Point2f, int>>> cnt_pts_id;
@@ -96,9 +108,10 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
     TicToc t_r;
     cur_time = _cur_time;
     cur_img = _img;
-    row = cur_img->rows;
-    col = cur_img->cols;
-    shared_ptr<cv::Mat> rightImg = _img1;
+    vpiCheckState(vpiImageCreateWrapperOpenCVMat(*_img, 0, &vpi_cur_img));
+    VPIImage vpi_right_img;
+    if(_img1 != NULL)
+        vpiCheckState(vpiImageCreateWrapperOpenCVMat(*_img1, 0, &vpi_right_img));
     /*
     {
         cv::Ptr<cv::CLAHE> clahe = cv::createCLAHE(3.0, cv::Size(8, 8));
@@ -113,41 +126,45 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
     {
         TicToc t_o;
         vector<uchar> status;
-        vector<float> err;
+        VPIArray vpi_status;
+        vpiCheckState(vpiArrayCreate(MAX_CNT, VPI_ARRAY_TYPE_U8, 0, &vpi_status));
         if(hasPrediction)
         {
-            cur_pts = predict_pts;
-            cv::calcOpticalFlowPyrLK(*prev_img, *cur_img, prev_pts, cur_pts, status, err, cv::Size(21, 21), 1, 
-            cv::TermCriteria(cv::TermCriteria::COUNT+cv::TermCriteria::EPS, 30, 0.01), cv::OPTFLOW_USE_INITIAL_FLOW);
-            
-            int succ_num = 0;
-            for (size_t i = 0; i < status.size(); i++)
-            {
-                if (status[i])
-                    succ_num++;
-            }
-            if (succ_num < 10)
-               cv::calcOpticalFlowPyrLK(*prev_img, *cur_img, prev_pts, cur_pts, status, err, cv::Size(21, 21), 3);
+            copyVPIArray(vpi_predict_pts, vpi_cur_pts);
+            lk_params.useInitialFlow = true;
         }
         else
-            cv::calcOpticalFlowPyrLK(*prev_img, *cur_img, prev_pts, cur_pts, status, err, cv::Size(21, 21), 3);
+            lk_params.useInitialFlow = false;
+
+        convertCVtoVPIArray(prev_pts, vpi_prev_pts);
+        vpiCheckState(vpiSubmitGaussianPyramidGenerator(vpi_stream, backend, vpi_cur_img, cur_pyr, VPI_BORDER_CLAMP));
+        vpiCheckState(vpiSubmitOpticalFlowPyrLK(vpi_stream, backend, optflow, prev_pyr, cur_pyr, vpi_prev_pts, vpi_cur_pts, vpi_status, &lk_params));
+        vpiCheckState(vpiStreamSync(vpi_stream));
+        convertVPIArrayToCV(vpi_status, status);
+        convertVPIArrayToCV(vpi_cur_pts, cur_pts);
+
         // reverse check
         if(FLOW_BACK)
         {
             vector<uchar> reverse_status;
-            vector<cv::Point2f> reverse_pts = prev_pts;
-            cv::calcOpticalFlowPyrLK(*cur_img, *prev_img, cur_pts, reverse_pts, reverse_status, err, cv::Size(21, 21), 1, 
-            cv::TermCriteria(cv::TermCriteria::COUNT+cv::TermCriteria::EPS, 30, 0.01), cv::OPTFLOW_USE_INITIAL_FLOW);
-            //cv::calcOpticalFlowPyrLK(cur_img, prev_img, cur_pts, reverse_pts, reverse_status, err, cv::Size(21, 21), 3); 
+            vector<cv::Point2f> reverse_pts;
+            VPIArray vpi_reverse_pts;
+            vpiCheckState(vpiArrayCreate(MAX_CNT, VPI_ARRAY_TYPE_KEYPOINT_F32, 0, &vpi_reverse_pts));
+            copyVPIArray(vpi_prev_pts, vpi_reverse_pts);
+
+            lk_params.useInitialFlow = true;
+            vpiCheckState(vpiSubmitOpticalFlowPyrLK(vpi_stream, backend, optflow, cur_pyr, prev_pyr, vpi_cur_pts, vpi_reverse_pts, vpi_status, &lk_params));
+            vpiCheckState(vpiStreamSync(vpi_stream));
+            convertVPIArrayToCV(vpi_status, reverse_status);
+            convertVPIArrayToCV(vpi_reverse_pts, reverse_pts);
+
             for(size_t i = 0; i < status.size(); i++)
-            {
                 if(status[i] && reverse_status[i] && distance(prev_pts[i], reverse_pts[i]) <= 0.5)
-                {
                     status[i] = 1;
-                }
                 else
                     status[i] = 0;
-            }
+
+            vpiArrayDestroy(vpi_reverse_pts);
         }
         
         for (int i = 0; i < int(cur_pts.size()); i++)
@@ -159,6 +176,8 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
         reduceVector(track_cnt, status);
         ROS_DEBUG("temporal optical flow costs: %fms", t_o.toc());
         //printf("track cnt %d\n", (int)ids.size());
+
+        vpiArrayDestroy(vpi_status);
     }
 
     for (auto &n : track_cnt)
@@ -181,7 +200,7 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
                 cout << "mask is empty " << endl;
             if (mask.type() != CV_8UC1)
                 cout << "mask type wrong " << endl;
-            cv::goodFeaturesToTrack(*cur_img, n_pts, MAX_CNT - cur_pts.size(), 0.01, MIN_DIST, mask);
+            cv::goodFeaturesToTrack(*_img, n_pts, MAX_CNT - cur_pts.size(), 0.01, MIN_DIST, mask);
         }
         else
             n_pts.clear();
@@ -210,17 +229,29 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
         {
             //printf("stereo image; track feature on right image\n");
             vector<cv::Point2f> reverseLeftPts;
-            vector<uchar> status, statusRightLeft;
-            vector<float> err;
+            vector<uchar> status, reverse_status;
+            VPIArray vpi_status, vpi_reverse_pts;
+            vpiCheckState(vpiArrayCreate(MAX_CNT, VPI_ARRAY_TYPE_U8, 0, &vpi_status));
+            vpiCheckState(vpiArrayCreate(MAX_CNT, VPI_ARRAY_TYPE_KEYPOINT_F32, 0, &vpi_reverse_pts));
             // cur left ---- cur right
-            cv::calcOpticalFlowPyrLK(*cur_img, *rightImg, cur_pts, cur_right_pts, status, err, cv::Size(21, 21), 3);
+            lk_params.useInitialFlow = false;
+            convertCVtoVPIArray(cur_pts, vpi_cur_pts);
+            vpiCheckState(vpiSubmitGaussianPyramidGenerator(vpi_stream, backend, vpi_right_img, right_pyr, VPI_BORDER_CLAMP));
+            vpiCheckState(vpiSubmitOpticalFlowPyrLK(vpi_stream, backend, optflow, cur_pyr, right_pyr, vpi_cur_pts, vpi_cur_right_pts, vpi_status, &lk_params));
+            vpiCheckState(vpiStreamSync(vpi_stream));
+            convertVPIArrayToCV(vpi_status, status);
+            convertVPIArrayToCV(vpi_cur_right_pts, cur_right_pts);
+
             // reverse check cur right ---- cur left
             if(FLOW_BACK)
             {
-                cv::calcOpticalFlowPyrLK(*rightImg, *cur_img, cur_right_pts, reverseLeftPts, statusRightLeft, err, cv::Size(21, 21), 3);
+                vpiCheckState(vpiSubmitOpticalFlowPyrLK(vpi_stream, backend, optflow, right_pyr, cur_pyr, vpi_cur_right_pts, vpi_reverse_pts, vpi_status, &lk_params));
+                vpiCheckState(vpiStreamSync(vpi_stream));
+                convertVPIArrayToCV(vpi_status, reverse_status);
+                convertVPIArrayToCV(vpi_reverse_pts, reverseLeftPts);
                 for(size_t i = 0; i < status.size(); i++)
                 {
-                    if(status[i] && statusRightLeft[i] && inBorder(cur_right_pts[i]) && distance(cur_pts[i], reverseLeftPts[i]) <= 0.5)
+                    if(status[i] && reverse_status[i] && inBorder(cur_right_pts[i]) && distance(cur_pts[i], reverseLeftPts[i]) <= 0.5)
                         status[i] = 1;
                     else
                         status[i] = 0;
@@ -240,11 +271,12 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
             */
             cur_un_right_pts = undistortedPts(cur_right_pts, m_camera[1]);
             right_pts_velocity = ptsVelocity(ids_right, cur_un_right_pts, cur_un_right_pts_map, prev_un_right_pts_map);
+
+            vpiArrayDestroy(vpi_status);
+            vpiArrayDestroy(vpi_reverse_pts);
         }
         prev_un_right_pts_map = cur_un_right_pts_map;
     }
-    if(SHOW_TRACK)
-        drawTrack(*cur_img, *rightImg, ids, cur_pts, cur_right_pts, prevLeftPtsMap);
 
     prev_img = cur_img;
     prev_pts = cur_pts;
@@ -252,6 +284,11 @@ map<int, vector<pair<int, Eigen::Matrix<double, 7, 1>>>> FeatureTracker::trackIm
     prev_un_pts_map = cur_un_pts_map;
     prev_time = cur_time;
     hasPrediction = false;
+
+    vpiImageDestroy(vpi_right_img);
+
+    swap(prev_pyr, cur_pyr);
+    swap(vpi_prev_pts, vpi_cur_pts);
 
     prevLeftPtsMap.clear();
     for(size_t i = 0; i < cur_pts.size(); i++)
@@ -316,13 +353,13 @@ void FeatureTracker::rejectWithF()
         {
             Eigen::Vector3d tmp_p;
             m_camera[0]->liftProjective(Eigen::Vector2d(cur_pts[i].x, cur_pts[i].y), tmp_p);
-            tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + col / 2.0;
-            tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + row / 2.0;
+            tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;
+            tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;
             un_cur_pts[i] = cv::Point2f(tmp_p.x(), tmp_p.y());
 
             m_camera[0]->liftProjective(Eigen::Vector2d(prev_pts[i].x, prev_pts[i].y), tmp_p);
-            tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + col / 2.0;
-            tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + row / 2.0;
+            tmp_p.x() = FOCAL_LENGTH * tmp_p.x() / tmp_p.z() + COL / 2.0;
+            tmp_p.y() = FOCAL_LENGTH * tmp_p.y() / tmp_p.z() + ROW / 2.0;
             un_prev_pts[i] = cv::Point2f(tmp_p.x(), tmp_p.y());
         }
 
@@ -353,10 +390,10 @@ void FeatureTracker::readIntrinsicParameter(const vector<string> &calib_file)
 
 void FeatureTracker::showUndistortion(const string &name)
 {
-    cv::Mat undistortedImg(row + 600, col + 600, CV_8UC1, cv::Scalar(0));
+    cv::Mat undistortedImg(ROW + 600, COL + 600, CV_8UC1, cv::Scalar(0));
     vector<Eigen::Vector2d> distortedp, undistortedp;
-    for (int i = 0; i < col; i++)
-        for (int j = 0; j < row; j++)
+    for (int i = 0; i < COL; i++)
+        for (int j = 0; j < ROW; j++)
         {
             Eigen::Vector2d a(i, j);
             Eigen::Vector3d b;
@@ -368,13 +405,13 @@ void FeatureTracker::showUndistortion(const string &name)
     for (int i = 0; i < int(undistortedp.size()); i++)
     {
         cv::Mat pp(3, 1, CV_32FC1);
-        pp.at<float>(0, 0) = undistortedp[i].x() * FOCAL_LENGTH + col / 2;
-        pp.at<float>(1, 0) = undistortedp[i].y() * FOCAL_LENGTH + row / 2;
+        pp.at<float>(0, 0) = undistortedp[i].x() * FOCAL_LENGTH + COL / 2;
+        pp.at<float>(1, 0) = undistortedp[i].y() * FOCAL_LENGTH + ROW / 2;
         pp.at<float>(2, 0) = 1.0;
         //cout << trackerData[0].K << endl;
         //printf("%lf %lf\n", p.at<float>(1, 0), p.at<float>(0, 0));
         //printf("%lf %lf\n", pp.at<float>(1, 0), pp.at<float>(0, 0));
-        if (pp.at<float>(1, 0) + 300 >= 0 && pp.at<float>(1, 0) + 300 < row + 600 && pp.at<float>(0, 0) + 300 >= 0 && pp.at<float>(0, 0) + 300 < col + 600)
+        if (pp.at<float>(1, 0) + 300 >= 0 && pp.at<float>(1, 0) + 300 < ROW + 600 && pp.at<float>(0, 0) + 300 >= 0 && pp.at<float>(0, 0) + 300 < COL + 600)
         {
             undistortedImg.at<uchar>(pp.at<float>(1, 0) + 300, pp.at<float>(0, 0) + 300) = cur_img->at<uchar>(distortedp[i].y(), distortedp[i].x());
         }
@@ -518,6 +555,7 @@ void FeatureTracker::setPrediction(map<int, Eigen::Vector3d> &predictPts)
         else
             predict_pts.push_back(prev_pts[i]);
     }
+    convertCVtoVPIArray(predict_pts, vpi_predict_pts);
 }
 
 

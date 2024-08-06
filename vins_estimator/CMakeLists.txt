@@ -3,7 +3,7 @@ project(vins)
 
 set(CMAKE_BUILD_TYPE "Release")
 set(CMAKE_CXX_FLAGS "-std=c++17")
-set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall")
+set(CMAKE_CXX_FLAGS_RELEASE "-O3 -Wall -g")
 
 find_package(catkin REQUIRED COMPONENTS
     roscpp
@@ -15,8 +15,10 @@ find_package(catkin REQUIRED COMPONENTS
     camera_models
     image_transport
     gnss_comm
-    segway_msgs)
+    segway_msgs
+    loop_fusion)
 
+find_package(vpi REQUIRED)
 find_package(OpenCV REQUIRED)
 
 # message(WARNING "OpenCV_VERSION: ${OpenCV_VERSION}")
@@ -55,9 +57,9 @@ add_library(vins_lib
     src/initial/initial_sfm.cpp
     src/initial/initial_ex_rotation.cpp
     src/initial/gnss_vi_initializer.cpp
-    src/featureTracker/feature_tracker.cpp)
-target_link_libraries(vins_lib ${catkin_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES})
-
+    src/featureTracker/feature_tracker.cpp
+    src/featureTracker/vpi_helper.cpp)
+target_link_libraries(vins_lib vpi ${catkin_LIBRARIES} ${OpenCV_LIBS} ${CERES_LIBRARIES})
 
 add_executable(vins_node src/rosNodeTest.cpp)
 target_link_libraries(vins_node vins_lib) 
